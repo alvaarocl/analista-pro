@@ -15,15 +15,31 @@ PLAYER_DICT = {
     "min": "Minutos", "game_count": "PJ"
 }
 
+# --- FUNCIÓN PARA ENCONTRAR LA CARPETA ---
+def get_data_dir():
+    """Busca la carpeta de datos ya sea DATOS o datos"""
+    if Path("DATOS").exists():
+        return Path("DATOS")
+    elif Path("datos").exists():
+        return Path("datos")
+    else:
+        return None
+
 # --- CARGA DE DATOS (BLINDADA) ---
 @st.cache_data
 def load_all_matches():
-    # Busca CSVs en la carpeta datos
-    files = list(Path("datos").glob("*.csv"))
+    # Usamos la función inteligente para encontrar la carpeta
+    data_dir = get_data_dir()
+    
+    if data_dir is None:
+        # Si no existe ninguna de las dos, devolvemos vacío pero sin error rojo
+        st.error("⚠️ No encuentro la carpeta 'DATOS' (ni 'datos'). Asegúrate de haberla subido a GitHub.")
+        return pd.DataFrame()
+        
+    files = list(data_dir.glob("*.csv"))
     files = [f for f in files if "jugadores" not in f.name]
     
     if not files:
-        # Si no hay archivos, devolvemos DF vacío pero no fallamos
         return pd.DataFrame()
         
     dfs = []
@@ -54,8 +70,13 @@ def load_all_matches():
 
 @st.cache_data
 def load_players():
-    path = Path("datos/jugadores_raw.csv")
+    data_dir = get_data_dir()
+    if data_dir is None: return pd.DataFrame()
+
+    path = data_dir / "jugadores_raw.csv"
+    
     if not path.exists(): return pd.DataFrame()
+    
     try:
         df = pd.read_csv(path)
         df.columns = [str(c).lower().strip() for c in df.columns]
@@ -362,4 +383,3 @@ else:
                 summ.rename(columns=PLAYER_DICT).style.format("{:.2f}", subset=['Remates','A Puerta','Faltas']),
                 hide_index=True, use_container_width=True, height=600
             )
-
