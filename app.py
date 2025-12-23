@@ -17,7 +17,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- DIAGNÓSTICO EN SIDEBAR (Para ver si carga archivos) ---
+# --- DIAGNÓSTICO EN SIDEBAR ---
 st.sidebar.title("🔧 Estado del Sistema")
 
 # 1. Buscar la carpeta de datos (Mayúsculas o Minúsculas)
@@ -27,14 +27,11 @@ elif Path("datos").exists(): data_dir = Path("datos")
 
 if data_dir is None:
     st.sidebar.error("❌ NO SE ENCUENTRA LA CARPETA 'datos' NI 'DATOS'.")
-    st.sidebar.info(f"Carpetas en el servidor: {os.listdir('.')}")
 else:
     st.sidebar.success(f"✅ Carpeta encontrada: {data_dir}")
-    # Contar archivos
     files = list(data_dir.glob("*.csv"))
     st.sidebar.caption(f"Archivos CSV encontrados: {len(files)}")
     
-    # Chequeo específico de jugadores
     p_path = data_dir / "jugadores_raw.csv"
     if p_path.exists():
         st.sidebar.success("✅ jugadores_raw.csv detectado")
@@ -71,7 +68,7 @@ def load_all_matches():
             if 'Date' in d.columns:
                 d['Date'] = pd.to_datetime(d['Date'], dayfirst=True, errors='coerce')
             
-            # Asegurar columnas
+            # Asegurar columnas (HS=HomeShots, HST=HomeShotsTarget)
             for col in ['HS','AS','HST','AST','HC','AC','HF','AF','HY','AY']:
                 if col not in d.columns: d[col] = 0
                 
@@ -112,7 +109,12 @@ def get_advanced_form(df, team, games=5, filter_mode='Auto'):
     
     if matches.empty: return None
     
-    stats = {'goals_for': [], 'goals_against': [], 'shots': [], 'corners': [], 'cards': [], 'fouls': [], 'results': []}
+    # Inicializamos listas (AQUÍ FALTABA SHOTS_TARGET)
+    stats = {
+        'goals_for': [], 'goals_against': [], 
+        'shots': [], 'shots_target': [], # <--- Agregado
+        'corners': [], 'cards': [], 'fouls': [], 'results': []
+    }
     log = []
 
     for _, r in matches.iterrows():
@@ -121,29 +123,42 @@ def get_advanced_form(df, team, games=5, filter_mode='Auto'):
         d_str = r['Date'].strftime("%d/%m")
         
         if is_home:
-            gf, ga = r['FTHG'], r['FTAG']; sh, co, ca, fo = r['HS'], r['HC'], r['HY'], r['HF']; tag = "(C)"
+            gf, ga = r['FTHG'], r['FTAG']
+            # HS=HomeShots, HST=HomeShotsTarget
+            sh, sot = r['HS'], r['HST'] 
+            co, ca, fo = r['HC'], r['HY'], r['HF']
+            tag = "(C)"
         else:
-            gf, ga = r['FTAG'], r['FTHG']; sh, co, ca, fo = r['AS'], r['AC'], r['AY'], r['AF']; tag = "(F)"
+            gf, ga = r['FTAG'], r['FTHG']
+            # AS=AwayShots, AST=AwayShotsTarget
+            sh, sot = r['AS'], r['AST']
+            co, ca, fo = r['AC'], r['AY'], r['AF']
+            tag = "(F)"
             
         if gf > ga: res = '✅'
         elif gf == ga: res = '➖'
         else: res = '❌'
         
         stats['goals_for'].append(gf); stats['goals_against'].append(ga)
-        stats['shots'].append(sh); stats['corners'].append(co)
-        stats['cards'].append(ca); stats['fouls'].append(fo)
+        stats['shots'].append(sh); stats['shots_target'].append(sot) # <--- Agregado
+        stats['corners'].append(co); stats['cards'].append(ca); stats['fouls'].append(fo)
         stats['results'].append(res)
         log.append(f"{d_str} {res} {int(gf)}-{int(ga)} vs {opp} {tag}")
 
     count = len(matches)
+    # Devolvemos el diccionario (AQUÍ FALTABA 'sot')
     return {
-        'gf': sum(stats['goals_for'])/count, 'ga': sum(stats['goals_against'])/count,
-        'sh': sum(stats['shots'])/count, 'corn': sum(stats['corners'])/count,
-        'card': sum(stats['cards'])/count, 'foul': sum(stats['fouls'])/count,
-        'log': log, 'raw_results': stats['results']
+        'gf': sum(stats['goals_for'])/count, 
+        'ga': sum(stats['goals_against'])/count,
+        'sh': sum(stats['shots'])/count, 
+        'sot': sum(stats['shots_target'])/count, # <--- Agregado (Esta era la Key que faltaba)
+        'corn': sum(stats['corners'])/count,
+        'card': sum(stats['cards'])/count, 
+        'foul': sum(stats['fouls'])/count,
+        'log': log, 
+        'raw_results': stats['results']
     }
 
-# Función Segura para pintar la racha (EVITA EL SYNTAX ERROR)
 def generate_streak_html(results):
     html = ""
     for r in results:
@@ -159,15 +174,11 @@ def normalize_str(s):
 
 def fuzzy_match_team(team_name, df_players):
     if df_players.empty or 'team' not in df_players.columns: return None
-    # 1. Mapeo Directo
     if team_name in TEAM_MAPPING: target = normalize_str(TEAM_MAPPING[team_name])
     else: target = normalize_str(team_name)
-    
     player_teams = df_players['team'].dropna().unique()
-    # 2. Búsqueda exacta
     for t in player_teams:
         if normalize_str(t) == target: return t
-    # 3. Búsqueda parcial
     for t in player_teams:
         norm = normalize_str(t)
         if target in norm or norm in target: return t
@@ -176,14 +187,11 @@ def fuzzy_match_team(team_name, df_players):
 def get_player_rankings(df_players, team_name):
     real_team = fuzzy_match_team(team_name, df_players)
     if not real_team: return None, None, None
-    
     df_p = df_players[df_players['team'] == real_team].copy()
     if df_p.empty: return None, None, None
     
-    # Goleadores
     scorers = df_p.groupby('player')[['gls', 'ast', 'min']].sum().sort_values('gls', ascending=False).head(5)
     
-    # Tiros (Filtrando gente con pocos partidos para no ensuciar media)
     game_counts = df_p['player'].value_counts()
     valid_p = game_counts[game_counts >= 2].index
     df_valid = df_p[df_p['player'].isin(valid_p)]
@@ -246,7 +254,6 @@ else:
             
             c_r1, c_r2 = st.columns(2)
             with c_r1: 
-                # USAMOS LA FUNCIÓN SEGURA PARA EVITAR SYNTAX ERROR
                 html_racha = generate_streak_html(stats_loc['raw_results'])
                 st.markdown(f"**Racha {local}:** {html_racha}", unsafe_allow_html=True)
             with c_r2:
@@ -257,7 +264,7 @@ else:
                 "Métrica": ["Goles A/C", "Tiros Tot/Puer", "Córners", "Tarjetas", "Faltas"],
                 f"{local}": [
                     f"{stats_loc['gf']:.1f} / {stats_loc['ga']:.1f}", 
-                    f"{stats_loc['sh']:.1f} / {stats_loc['sot']:.1f}", 
+                    f"{stats_loc['sh']:.1f} / {stats_loc['sot']:.1f}", # AHORA SÍ EXISTE 'sot'
                     f"{stats_loc['corn']:.1f}", f"{stats_loc['card']:.1f}", f"{stats_loc['foul']:.1f}"
                 ],
                 f"{visitante}": [
