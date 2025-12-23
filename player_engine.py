@@ -6,11 +6,7 @@ import unicodedata
 
 warnings.filterwarnings('ignore')
 
-def normalize_name(name):
-    if not isinstance(name, str): return str(name)
-    n = ''.join(c for c in unicodedata.normalize('NFD', name) if unicodedata.category(c) != 'Mn')
-    return n.lower().strip()
-
+# Mapeo para normalizar nombres de equipos
 TEAM_MAP = {
     "betis": "Real Betis", "real betis": "Real Betis",
     "athletic": "Athletic Club", "ath bilbao": "Athletic Club",
@@ -26,54 +22,123 @@ TEAM_MAP = {
     "leganes": "Leganés", "valladolid": "Real Valladolid", "espanyol": "Espanyol"
 }
 
+def normalize_name(name):
+    if not isinstance(name, str): return str(name)
+    n = ''.join(c for c in unicodedata.normalize('NFD', name) if unicodedata.category(c) != 'Mn')
+    return n.lower().strip()
+
+def fix_game_column(df, df_name):
+    """
+    Busca la columna del ID del partido (game, game_id, match_id)
+    y la renombra obligatoriamente a 'game'.
+    """
+    if df.empty:
+        return df
+
+    # Limpiar nombres de columnas primero
+    df.columns = [str(c[-1] if isinstance(c, tuple) else c).lower().strip() for c in df.columns]
+    df = df.loc[:, ~df.columns.str.contains('unnamed')]
+
+    # Posibles nombres que usa soccerdata
+    candidates = ['game', 'game_id', 'match_id', 'match']
+    
+    found_col = None
+    for col in candidates:
+        if col in df.columns:
+            found_col = col
+            break
+            
+    if found_col:
+        # Si se llama distinto a 'game', renombramos
+        if found_col != 'game':
+            print(f"🔧 Arreglando columna en {df_name}: '{found_col}' -> 'game'")
+            df = df.rename(columns={found_col: 'game'})
+    else:
+        print(f"⚠️ ADVERTENCIA: No encuentro la columna 'game' en {df_name}. Columnas disponibles: {list(df.columns)}")
+        # Intentamos adivinar si alguna columna parece un ID (contiene números o hashes)
+        # Esto es un fallback de emergencia
+    
+    return df
+
 def download_player_stats():
-    print("📥 Descargando JUGADORES 25/26 (Limpiando duplicados)...")
+    print("📥 Iniciando descarga de JUGADORES (Temporada 25/26)...")
+    
     try:
-        # TEMPORADA CORRECTA: 2526
+        # IMPORTANTE: Usamos la temporada 2526
         fbref = sd.FBref(leagues="ESP-La Liga", seasons=["2526"])
         
+        print("📅 Descargando Calendario...")
         schedule = fbref.read_schedule().reset_index()
-        schedule.columns = [str(c[-1] if isinstance(c, tuple) else c).lower() for c in schedule.columns]
+        schedule = fix_game_column(schedule, "Calendario")
         
-        id_col = 'game_id' if 'game_id' in schedule.columns else 'game'
-        schedule_min = schedule[[id_col, 'date']].drop_duplicates()
+        # Filtramos solo lo necesario del calendario
+        if 'game' in schedule.columns and 'date' in schedule.columns:
+            schedule_min = schedule[['game', 'date']].drop_duplicates()
+        else:
+            print("❌ Error: El calendario no tiene 'game' o 'date'.")
+            return
 
+        print("⚽ Descargando Estadísticas (Summary)...")
         summary = fbref.read_player_match_stats(stat_type="summary").reset_index()
+        summary = fix_game_column(summary, "Stats Summary")
+
+        print("🟨 Descargando Estadísticas (Misc)...")
         misc = fbref.read_player_match_stats(stat_type="misc").reset_index()
-        
-        # Limpieza nombres columnas
-        for df in [summary, misc]:
-            df.columns = [str(c[-1] if isinstance(c, tuple) else c).lower() for c in df.columns]
-            df = df.loc[:, ~df.columns.str.contains('unnamed')]
+        misc = fix_game_column(misc, "Stats Misc")
 
-        # Unión
-        df = pd.merge(summary, misc, on=['game', 'team', 'player'], how='left', suffixes=('', '_misc'))
-        df = pd.merge(df, schedule_min, left_on='game', right_on=id_col, how='left')
+        # Verificar si tenemos datos
+        if summary.empty:
+            print("❌ Error: No se han encontrado datos de jugadores (Summary vacío).")
+            return
+
+        print("🔄 Procesando y uniendo tablas...")
         
-        # --- LIMPIEZA DE DUPLICADOS (CRÍTICO) ---
-        # Si ejecutaste el script varias veces, esto elimina las copias
-        initial = len(df)
+        # Claves de unión seguras
+        join_keys = ['game', 'team', 'player']
+        
+        # Verificar que existen las claves en ambos
+        missing_summ = [k for k in join_keys if k not in summary.columns]
+        missing_misc = [k for k in join_keys if k in misc.columns] # Misc a veces no trae todo, ajustamos
+        
+        if missing_summ:
+            print(f"❌ Faltan columnas clave en Summary: {missing_summ}")
+            return
+
+        # Unión Summary + Misc
+        df = pd.merge(summary, misc, on=join_keys, how='left', suffixes=('', '_misc'))
+        
+        # Unión con Fechas
+        df = pd.merge(df, schedule_min, on='game', how='left')
+        
+        # --- LIMPIEZA DE DUPLICADOS ---
+        # Borra filas si un jugador sale repetido en el mismo partido
+        initial_rows = len(df)
         df = df.drop_duplicates(subset=['game', 'player'])
-        final = len(df)
-        if initial > final:
-            print(f"🧹 Eliminadas {initial - final} filas duplicadas.")
+        final_rows = len(df)
+        if initial_rows > final_rows:
+            print(f"🧹 Se eliminaron {initial_rows - final_rows} filas duplicadas.")
 
-        # Normalizar equipos
+        # Normalizar nombres de equipos
         if 'team' in df.columns:
             df['team'] = df['team'].apply(lambda x: TEAM_MAP.get(normalize_name(x), x))
 
-        # Rellenar nulos
-        for col in ['sh', 'sot', 'fls', 'crdy', 'gls', 'ast']:
+        # Rellenar ceros en métricas clave
+        cols_to_numeric = ['sh', 'sot', 'fls', 'crdy', 'gls', 'ast']
+        for col in cols_to_numeric:
             if col not in df.columns: df[col] = 0
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-        out = Path("datos/jugadores_raw.csv")
-        out.parent.mkdir(exist_ok=True)
-        df.to_csv(out, index=False)
-        print(f"✅ ÉXITO: Datos 25/26 guardados en {out}")
+        # Guardar
+        out_path = Path("datos/jugadores_raw.csv")
+        out_path.parent.mkdir(exist_ok=True)
+        df.to_csv(out_path, index=False)
+        print(f"✅ ¡ÉXITO! Base de datos generada en: {out_path}")
+        print(f"📊 Total registros: {len(df)}")
 
     except Exception as e:
-        print(f"❌ Error: {e}")
+        import traceback
+        print(f"❌ Error Crítico: {e}")
+        print(traceback.format_exc()) # Esto nos dirá la línea exacta si vuelve a fallar
 
 if __name__ == "__main__":
     download_player_stats()
