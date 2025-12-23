@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import data_updater
 import news_engine
+import player_engine  # Importamos esto para poder descargar datos si faltan
 from pathlib import Path
 import unicodedata
 
@@ -26,7 +27,16 @@ MATCH_DICT = {
 # --- CARGA DE DATOS ---
 @st.cache_resource
 def run_updates():
+    """Descarga datos al iniciar si no existen o para actualizar"""
+    # 1. Actualizar partidos
     data_updater.update_data()
+    
+    # 2. Verificar si existen los jugadores. Si no, descargarlos AHORA.
+    # Esto es vital para Streamlit Cloud donde el disco empieza vacío.
+    players_path = Path("datos/jugadores_raw.csv")
+    if not players_path.exists():
+        with st.spinner("⚠️ Descargando base de datos de jugadores por primera vez (puede tardar 1 min)..."):
+            player_engine.download_player_stats()
 
 @st.cache_data
 def load_matches():
@@ -49,9 +59,17 @@ def load_players():
     if not path.exists(): return pd.DataFrame()
     try:
         df = pd.read_csv(path)
+        # Normalizar columnas a minúsculas y sin espacios
         df.columns = [str(c).lower().strip() for c in df.columns]
+        
+        # CORRECCIÓN DE ERROR KEYERROR:
+        # A veces FBref llama a la columna 'squad' en lugar de 'team'. Lo unificamos.
+        if 'squad' in df.columns:
+            df = df.rename(columns={'squad': 'team'})
+            
         if 'date' in df.columns:
             df['date'] = pd.to_datetime(df['date'], errors='coerce')
+            
         return df
     except: return pd.DataFrame()
 
@@ -62,7 +80,7 @@ def normalize_str(s):
     return ''.join(c for c in unicodedata.normalize('NFD', s.lower()) if unicodedata.category(c) != 'Mn')
 
 def fuzzy_match_team(team_name, df_players):
-    if df_players.empty: return team_name
+    if df_players.empty or 'team' not in df_players.columns: return team_name
     target = normalize_str(team_name)
     player_teams = df_players['team'].dropna().unique()
     for t in player_teams:
@@ -84,7 +102,7 @@ def get_stats_pack(df, team, venue_filter='All'):
     if matches.empty: return None
     
     stats = {'goals': [], 'shots': [], 'corners': [], 'cards': [], 'fouls': []}
-    history = [] # Lista de strings: "G 2-1 vs Betis"
+    history = [] 
 
     for _, r in matches.iterrows():
         is_home = (r['HomeTeam'] == team)
@@ -107,11 +125,15 @@ def get_stats_pack(df, team, venue_filter='All'):
 
     avgs = {k: sum(v)/len(v) if v else 0 for k, v in stats.items()}
     avgs['count'] = len(matches)
-    avgs['match_log'] = history # Guardamos el historial
+    avgs['match_log'] = history 
     return avgs
 
 def get_extended_player_list(df_players, team_name):
     """Devuelve DataFrames de jugadores clave."""
+    # PROTECCIÓN CONTRA EL ERROR KEYERROR
+    if df_players.empty or 'team' not in df_players.columns:
+        return pd.DataFrame()
+        
     real_team = fuzzy_match_team(team_name, df_players)
     df_p = df_players[df_players['team'] == real_team].copy()
     if df_p.empty: return pd.DataFrame()
@@ -122,7 +144,7 @@ def get_extended_player_list(df_players, team_name):
 
 def prepare_display_tables(df_recent):
     """Prepara las tablas bonitas (Top 6)"""
-    if df_recent.empty: return None, None
+    if df_recent is None or df_recent.empty: return None, None
     
     # Tabla 1: Rematadores
     df_sh = df_recent.groupby('player')[['sh', 'sot']].mean().sort_values('sh', ascending=False).head(6)
@@ -135,7 +157,9 @@ def prepare_display_tables(df_recent):
     return df_sh, df_fls
 
 # --- INTERFAZ ---
+# Ejecutamos la actualización al principio
 run_updates()
+
 df = load_matches()
 df_players = load_players()
 
@@ -143,13 +167,13 @@ st.sidebar.title("🤖 Analista Pro")
 tabs = st.tabs(["📉 Comparador de Datos", "📊 Base de Datos", "⚽ Jugador", "🏟️ Plantillas"])
 
 # ==============================================================================
-# TAB 1: COMPARADOR DE DATOS (SIN OPINIONES, SOLO HECHOS)
+# TAB 1: COMPARADOR DE DATOS (SOLO DATOS)
 # ==============================================================================
 with tabs[0]:
     st.header("📉 Comparador de Datos Puro")
     
     if df.empty:
-        st.warning("Sin datos.")
+        st.warning("⚠️ No se encontraron datos de partidos. Verifica que la descarga funcionó.")
     else:
         teams = sorted(df['HomeTeam'].dropna().unique())
         c1, c2 = st.columns(2)
@@ -159,7 +183,6 @@ with tabs[0]:
         if st.button("📊 MOSTRAR DATOS", type="primary"):
             
             # 1. OBTENER DATOS
-            # Contexto Específico (Lo más importante: Local en Casa vs Visitante Fuera)
             spec_loc = get_stats_pack(df, local, 'Home')
             spec_vis = get_stats_pack(df, visitante, 'Away')
             
@@ -167,7 +190,7 @@ with tabs[0]:
             df_p_loc = get_extended_player_list(df_players, local)
             df_p_vis = get_extended_player_list(df_players, visitante)
             
-            # Noticias (Opcional, solo texto informativo)
+            # Noticias
             with st.spinner("Cargando noticias..."):
                 try:
                     news = news_engine.get_live_context(local, visitante)
@@ -176,8 +199,7 @@ with tabs[0]:
 
             st.divider()
 
-            # --- SECCIÓN 1: EL CONTEXTO DE RIVALES (NUEVO E IMPORTANTE) ---
-            # Aquí mostramos contra quién jugaron para dar contexto a los números
+            # --- SECCIÓN 1: HISTORIAL ---
             st.subheader("🗓️ Historial Reciente (Contexto de Fuerza)")
             
             col_h1, col_h2 = st.columns(2)
@@ -200,7 +222,7 @@ with tabs[0]:
 
             st.divider()
 
-            # --- SECCIÓN 2: COMPARATIVA NUMÉRICA (CASA vs FUERA) ---
+            # --- SECCIÓN 2: COMPARATIVA NUMÉRICA ---
             st.subheader("⚖️ Estadísticas Medias (Casa vs Fuera)")
             
             if spec_loc and spec_vis:
@@ -221,7 +243,7 @@ with tabs[0]:
 
             st.divider()
 
-            # --- SECCIÓN 3: JUGADORES CLAVE (TABLAS) ---
+            # --- SECCIÓN 3: JUGADORES CLAVE ---
             st.subheader("🔥 Rendimiento Individual (Media Últimos 5)")
             
             col_pl_loc, col_pl_vis = st.columns(2)
@@ -229,28 +251,29 @@ with tabs[0]:
             # LOCAL
             with col_pl_loc:
                 st.markdown(f"🏠 **{local}**")
-                sh_loc, fl_loc = prepare_display_tables(df_p_loc)
-                if sh_loc is not None:
-                    st.caption("🎯 Francotiradores (Tiros)")
-                    st.dataframe(sh_loc.style.format("{:.2f}"), use_container_width=True)
-                    st.caption("🪓 Leñeros (Faltas/Tarjetas)")
-                    st.dataframe(fl_loc.style.format("{:.2f}"), use_container_width=True)
+                if not df_p_loc.empty:
+                    sh_loc, fl_loc = prepare_display_tables(df_p_loc)
+                    if sh_loc is not None:
+                        st.caption("🎯 Francotiradores (Tiros)")
+                        st.dataframe(sh_loc.style.format("{:.2f}"), use_container_width=True)
+                        st.caption("🪓 Leñeros (Faltas/Tarjetas)")
+                        st.dataframe(fl_loc.style.format("{:.2f}"), use_container_width=True)
                 else:
-                    st.info("Sin datos de jugadores.")
+                    st.info(f"Sin datos de jugadores para {local}.")
 
             # VISITANTE
             with col_pl_vis:
                 st.markdown(f"✈️ **{visitante}**")
-                sh_vis, fl_vis = prepare_display_tables(df_p_vis)
-                if sh_vis is not None:
-                    st.caption("🎯 Francotiradores (Tiros)")
-                    st.dataframe(sh_vis.style.format("{:.2f}"), use_container_width=True)
-                    st.caption("🪓 Leñeros (Faltas/Tarjetas)")
-                    st.dataframe(fl_vis.style.format("{:.2f}"), use_container_width=True)
+                if not df_p_vis.empty:
+                    sh_vis, fl_vis = prepare_display_tables(df_p_vis)
+                    if sh_vis is not None:
+                        st.caption("🎯 Francotiradores (Tiros)")
+                        st.dataframe(sh_vis.style.format("{:.2f}"), use_container_width=True)
+                        st.caption("🪓 Leñeros (Faltas/Tarjetas)")
+                        st.dataframe(fl_vis.style.format("{:.2f}"), use_container_width=True)
                 else:
-                    st.info("Sin datos de jugadores.")
+                    st.info(f"Sin datos de jugadores para {visitante}.")
 
-            # Noticias (Discreto al final)
             with st.expander("📰 Ver Noticias de Prensa (Bajas y Contexto)"):
                 st.write(news.get('texto', 'Sin noticias disponibles.'))
 
@@ -267,16 +290,22 @@ with tabs[1]:
 with tabs[2]:
     st.header("⚽ Jugador")
     if not df_players.empty:
-        tm = st.selectbox("Equipo", sorted(df_players['team'].dropna().unique()), key="t2_tm")
-        pl = st.selectbox("Jugador", sorted(df_players[df_players['team']==tm]['player'].unique()), key="t2_pl")
-        stats = df_players[df_players['player']==pl].sort_values('date', ascending=False)
-        st.dataframe(stats[['date','game','sh','sot','fls','crdy']].rename(columns=PLAYER_DICT), hide_index=True)
+        teams = sorted(df_players['team'].dropna().unique()) if 'team' in df_players.columns else []
+        if teams:
+            tm = st.selectbox("Equipo", teams, key="t2_tm")
+            pl = st.selectbox("Jugador", sorted(df_players[df_players['team']==tm]['player'].unique()), key="t2_pl")
+            stats = df_players[df_players['player']==pl].sort_values('date', ascending=False)
+            st.dataframe(stats[['date','game','sh','sot','fls','crdy']].rename(columns=PLAYER_DICT), hide_index=True)
+        else:
+            st.warning("Datos de jugadores incompletos.")
 
 with tabs[3]:
     st.header("🏟️ Plantilla")
     if not df_players.empty:
-        tm = st.selectbox("Equipo", sorted(df_players['team'].dropna().unique()), key="t3_tm")
-        df_t = df_players[df_players['team']==tm]
-        summ = df_t.groupby('player').agg({'sh':'mean','sot':'mean','fls':'mean','crdy':'sum'}).sort_values('sh', ascending=False).reset_index()
-        summ = summ.rename(columns={'date': 'game_count'})
-        st.dataframe(summ.rename(columns=PLAYER_DICT).style.format({"Remates": "{:.2f}", "A Puerta": "{:.2f}", "Faltas": "{:.2f}"}), hide_index=True, use_container_width=True, height=600)
+        teams = sorted(df_players['team'].dropna().unique()) if 'team' in df_players.columns else []
+        if teams:
+            tm = st.selectbox("Equipo", teams, key="t3_tm")
+            df_t = df_players[df_players['team']==tm]
+            summ = df_t.groupby('player').agg({'sh':'mean','sot':'mean','fls':'mean','crdy':'sum'}).sort_values('sh', ascending=False).reset_index()
+            summ = summ.rename(columns={'date': 'game_count'})
+            st.dataframe(summ.rename(columns=PLAYER_DICT).style.format({"Remates": "{:.2f}", "A Puerta": "{:.2f}", "Faltas": "{:.2f}"}), hide_index=True, use_container_width=True, height=600)
