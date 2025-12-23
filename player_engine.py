@@ -6,7 +6,7 @@ import unicodedata
 
 warnings.filterwarnings('ignore')
 
-# Mapeo para normalizar nombres de equipos
+# Mapeo de equipos
 TEAM_MAP = {
     "betis": "Real Betis", "real betis": "Real Betis",
     "athletic": "Athletic Club", "ath bilbao": "Athletic Club",
@@ -27,118 +27,132 @@ def normalize_name(name):
     n = ''.join(c for c in unicodedata.normalize('NFD', name) if unicodedata.category(c) != 'Mn')
     return n.lower().strip()
 
-def fix_game_column(df, df_name):
+def flatten_and_clean(df, source_name):
     """
-    Busca la columna del ID del partido (game, game_id, match_id)
-    y la renombra obligatoriamente a 'game'.
+    Aplana MultiIndex, saca el índice a columnas y renombra lo básico.
     """
-    if df.empty:
-        return df
+    print(f"🔧 Procesando tabla: {source_name}...")
+    
+    # 1. Aplanar columnas MultiIndex (Ej: ('Performance', 'Gls') -> 'gls')
+    if isinstance(df.columns, pd.MultiIndex):
+        new_cols = []
+        for col in df.columns:
+            # Cogemos el último nivel que no esté vacío
+            # Si col es ('', 'Player') -> 'Player'
+            # Si col es ('Performance', 'Gls') -> 'Gls'
+            c_name = col[-1] if col[-1] else (col[0] if col[0] else "unknown")
+            new_cols.append(str(c_name))
+        df.columns = new_cols
 
-    # Limpiar nombres de columnas primero
-    df.columns = [str(c[-1] if isinstance(c, tuple) else c).lower().strip() for c in df.columns]
+    # 2. Resetear el índice (Aquí es donde suelen estar 'game', 'player', 'team')
+    # soccerdata suele poner los IDs en el índice, no en las columnas.
+    df = df.reset_index()
+
+    # 3. Limpieza de nombres
+    df.columns = [str(c).lower().strip() for c in df.columns]
+    
+    # 4. Renombrado inteligente (si el índice no tenía nombre, se llama 'level_0', etc)
+    # soccerdata devuelve: league, season, game, team, player (en ese orden en el índice)
+    
+    # Mapeo explícito de columnas conocidas
+    rename_map = {
+        'game_id': 'game', 'match_id': 'game', 'match': 'game',
+        'squad': 'team', 'opponent': 'opponent', 
+        'player': 'player', 'date': 'date'
+    }
+    df = df.rename(columns=rename_map)
+
+    # 5. Eliminar columnas vacías o 'unnamed'
     df = df.loc[:, ~df.columns.str.contains('unnamed')]
+    df = df.loc[:, df.columns != '']
 
-    # Posibles nombres que usa soccerdata
-    candidates = ['game', 'game_id', 'match_id', 'match']
+    # Debug: Ver si tenemos lo necesario
+    required = ['game', 'team', 'player']
+    missing = [x for x in required if x not in df.columns]
     
-    found_col = None
-    for col in candidates:
-        if col in df.columns:
-            found_col = col
-            break
-            
-    if found_col:
-        # Si se llama distinto a 'game', renombramos
-        if found_col != 'game':
-            print(f"🔧 Arreglando columna en {df_name}: '{found_col}' -> 'game'")
-            df = df.rename(columns={found_col: 'game'})
+    if missing:
+        print(f"⚠️ AVISO en {source_name}: Faltan columnas {missing}. Columnas actuales: {list(df.columns)}")
     else:
-        print(f"⚠️ ADVERTENCIA: No encuentro la columna 'game' en {df_name}. Columnas disponibles: {list(df.columns)}")
-        # Intentamos adivinar si alguna columna parece un ID (contiene números o hashes)
-        # Esto es un fallback de emergencia
-    
+        print(f"✅ {source_name} procesada correctamente.")
+        
     return df
 
 def download_player_stats():
-    print("📥 Iniciando descarga de JUGADORES (Temporada 25/26)...")
+    print("📥 Iniciando descarga de JUGADORES 25/26 (Script Robusto)...")
     
     try:
-        # IMPORTANTE: Usamos la temporada 2526
+        # Usamos temporada 2526
         fbref = sd.FBref(leagues="ESP-La Liga", seasons=["2526"])
         
+        # 1. CALENDARIO
         print("📅 Descargando Calendario...")
-        schedule = fbref.read_schedule().reset_index()
-        schedule = fix_game_column(schedule, "Calendario")
+        schedule = fbref.read_schedule()
+        schedule = flatten_and_clean(schedule, "Calendario")
         
-        # Filtramos solo lo necesario del calendario
         if 'game' in schedule.columns and 'date' in schedule.columns:
             schedule_min = schedule[['game', 'date']].drop_duplicates()
         else:
-            print("❌ Error: El calendario no tiene 'game' o 'date'.")
+            print("❌ Error crítico: No se pudo extraer 'game' y 'date' del calendario.")
             return
 
-        print("⚽ Descargando Estadísticas (Summary)...")
-        summary = fbref.read_player_match_stats(stat_type="summary").reset_index()
-        summary = fix_game_column(summary, "Stats Summary")
+        # 2. SUMMARY (Estadísticas principales)
+        print("⚽ Descargando Stats Summary...")
+        summary = fbref.read_player_match_stats(stat_type="summary")
+        summary = flatten_and_clean(summary, "Summary")
 
-        print("🟨 Descargando Estadísticas (Misc)...")
-        misc = fbref.read_player_match_stats(stat_type="misc").reset_index()
-        misc = fix_game_column(misc, "Stats Misc")
+        # 3. MISC (Tarjetas, faltas, etc)
+        print("🟨 Descargando Stats Misc...")
+        misc = fbref.read_player_match_stats(stat_type="misc")
+        misc = flatten_and_clean(misc, "Misc")
 
-        # Verificar si tenemos datos
-        if summary.empty:
-            print("❌ Error: No se han encontrado datos de jugadores (Summary vacío).")
-            return
-
-        print("🔄 Procesando y uniendo tablas...")
+        # 4. UNIÓN
+        print("🔄 Uniendo tablas...")
         
-        # Claves de unión seguras
+        # Aseguramos claves de unión
         join_keys = ['game', 'team', 'player']
         
-        # Verificar que existen las claves en ambos
-        missing_summ = [k for k in join_keys if k not in summary.columns]
-        missing_misc = [k for k in join_keys if k in misc.columns] # Misc a veces no trae todo, ajustamos
-        
-        if missing_summ:
-            print(f"❌ Faltan columnas clave en Summary: {missing_summ}")
+        # Verificar integridad
+        if not set(join_keys).issubset(summary.columns):
+            print("❌ Deteniendo: Faltan claves en Summary.")
             return
 
-        # Unión Summary + Misc
+        # Merge Summary + Misc
         df = pd.merge(summary, misc, on=join_keys, how='left', suffixes=('', '_misc'))
         
-        # Unión con Fechas
+        # Merge con Fechas
         df = pd.merge(df, schedule_min, on='game', how='left')
         
-        # --- LIMPIEZA DE DUPLICADOS ---
-        # Borra filas si un jugador sale repetido en el mismo partido
-        initial_rows = len(df)
+        # 5. LIMPIEZA FINAL
+        # Eliminar duplicados
+        initial = len(df)
         df = df.drop_duplicates(subset=['game', 'player'])
-        final_rows = len(df)
-        if initial_rows > final_rows:
-            print(f"🧹 Se eliminaron {initial_rows - final_rows} filas duplicadas.")
+        final = len(df)
+        if initial > final:
+            print(f"🧹 Eliminados {initial - final} registros duplicados.")
 
-        # Normalizar nombres de equipos
+        # Normalizar equipos
         if 'team' in df.columns:
             df['team'] = df['team'].apply(lambda x: TEAM_MAP.get(normalize_name(x), x))
 
-        # Rellenar ceros en métricas clave
-        cols_to_numeric = ['sh', 'sot', 'fls', 'crdy', 'gls', 'ast']
-        for col in cols_to_numeric:
+        # Convertir a números (rellenar vacíos con 0)
+        numeric_cols = ['sh', 'sot', 'fls', 'crdy', 'gls', 'ast']
+        for col in numeric_cols:
             if col not in df.columns: df[col] = 0
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-        # Guardar
+        # 6. GUARDAR
         out_path = Path("datos/jugadores_raw.csv")
         out_path.parent.mkdir(exist_ok=True)
         df.to_csv(out_path, index=False)
+        
         print(f"✅ ¡ÉXITO! Base de datos generada en: {out_path}")
-        print(f"📊 Total registros: {len(df)}")
+        print(f"📊 Filas totales: {len(df)}")
+        print("👉 AHORA: Sube 'datos/jugadores_raw.csv' a GitHub.")
 
     except Exception as e:
         import traceback
-        print(f"❌ Error Crítico: {e}")
-        print(traceback.format_exc()) # Esto nos dirá la línea exacta si vuelve a fallar
+        print(f"❌ ERROR CRÍTICO DEL SISTEMA: {e}")
+        print(traceback.format_exc())
 
 if __name__ == "__main__":
     download_player_stats()
