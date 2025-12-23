@@ -10,12 +10,10 @@ st.set_page_config(page_title="Analista Pro Total", layout="wide", page_icon="�
 # --- ESTILOS CSS ---
 st.markdown("""
 <style>
-    .win { color: #4CAF50; font-weight: bold; font-size: 1.5em; padding: 0 5px; }
-    .loss { color: #F44336; font-weight: bold; font-size: 1.5em; padding: 0 5px; }
-    .draw { color: #FFC107; font-weight: bold; font-size: 1.5em; padding: 0 5px; }
-    .stat-box { background-color: #262730; padding: 15px; border-radius: 8px; text-align: center; margin-bottom: 10px; }
-    .big-number { font-size: 24px; font-weight: bold; }
-    .label { font-size: 14px; color: #aaa; }
+    .win { color: #4CAF50; font-weight: bold; font-size: 1.2em; }
+    .loss { color: #F44336; font-weight: bold; font-size: 1.2em; }
+    .draw { color: #FFC107; font-weight: bold; font-size: 1.2em; }
+    .stat-box { background-color: #262730; padding: 10px; border-radius: 5px; text-align: center; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -49,7 +47,7 @@ TEAM_MAPPING = {
     "Almeria": "Almería", "Leganes": "Leganés"
 }
 
-# --- FUNCIONES DE CARGA ---
+# --- CARGA DE DATOS ---
 @st.cache_data
 def load_all_matches():
     if data_dir is None: return pd.DataFrame()
@@ -85,25 +83,24 @@ def load_players():
     if not path.exists(): return pd.DataFrame()
     try:
         df = pd.read_csv(path)
-        # Normalizar columnas a minúsculas
         df.columns = [str(c).lower().strip() for c in df.columns]
         
-        # Corrección nombre equipo
         if 'squad' in df.columns: df = df.rename(columns={'squad': 'team'})
         
-        # Corrección fechas
         if 'date' in df.columns:
             df['date'] = pd.to_datetime(df['date'], dayfirst=True, errors='coerce')
+            # FILTRO TEMPORADA 25/26 (Desde Agosto 2025)
+            df = df[df['date'] > '2025-08-01']
             
         return df
     except: return pd.DataFrame()
 
-# --- FUNCIONES LÓGICAS ---
+# --- LÓGICA ---
 def get_advanced_form(df, team, games=5, filter_mode='Auto'):
     if df.empty: return None
     
-    # Filtro de temporada (Partidos)
-    df_curr = df.sort_values('Date', ascending=True) 
+    # Filtro Partidos 25/26
+    df_curr = df[df['Date'] > '2025-08-01']
     
     if filter_mode == 'Home': matches = df_curr[df_curr['HomeTeam'] == team]
     elif filter_mode == 'Away': matches = df_curr[df_curr['AwayTeam'] == team]
@@ -178,15 +175,22 @@ def get_player_rankings(df_players, team_name):
     df_p = df_players[df_players['team'] == real_team].copy()
     if df_p.empty: return None, None, None
     
-    # Asegurar que las columnas son numéricas
+    # Asegurar numéricos
     for col in ['gls', 'ast', 'min', 'sh', 'sot', 'fls', 'crdy']:
         if col in df_p.columns:
             df_p[col] = pd.to_numeric(df_p[col], errors='coerce').fillna(0)
 
+    # 1. Goleadores
     scorers = df_p.groupby('player')[['gls', 'ast', 'min']].sum().sort_values('gls', ascending=False).head(5)
     
-    shooters = df_p.groupby('player')[['sh', 'sot']].mean().sort_values('sh', ascending=False).head(5)
-    bad_boys = df_p.groupby('player')[['fls', 'crdy']].mean().sort_values('fls', ascending=False).head(5)
+    # 2. Tiros (Media)
+    game_counts = df_p['player'].value_counts()
+    valid_p = game_counts[game_counts >= 2].index
+    df_valid = df_p[df_p['player'].isin(valid_p)]
+    shooters = df_valid.groupby('player')[['sh', 'sot']].mean().sort_values('sh', ascending=False).head(5)
+    
+    # 3. Faltas (Media)
+    bad_boys = df_valid.groupby('player')[['fls', 'crdy']].mean().sort_values('fls', ascending=False).head(5)
     
     return scorers, shooters, bad_boys
 
@@ -211,17 +215,15 @@ full_df = load_all_matches()
 df_players = load_players()
 
 if full_df.empty:
-    st.error("⚠️ La base de datos de partidos está vacía. Revisa la barra lateral.")
+    st.error("⚠️ La base de datos de partidos está vacía.")
 else:
-    # --- ARREGLO DEL ERROR DE SORTED ---
-    recent_matches = full_df.sort_values('Date').tail(400)
+    # Selector de equipos (Último año)
+    recent_matches = full_df[full_df['Date'] > '2025-08-01']
     unique_teams_raw = recent_matches['HomeTeam'].unique()
     clean_teams = [str(t) for t in unique_teams_raw if pd.notna(t)]
     all_teams = sorted(clean_teams)
     
-    if not all_teams: 
-        raw_all = full_df['HomeTeam'].unique()
-        all_teams = sorted([str(t) for t in raw_all if pd.notna(t)])
+    if not all_teams: all_teams = sorted([str(t) for t in full_df['HomeTeam'].unique() if pd.notna(t)])
 
     tabs = st.tabs(["🆚 Comparador PRO", "🛡️ Equipos", "⚽ Jugadores", "🏟️ Plantillas"])
 
@@ -244,6 +246,7 @@ else:
         
         if stats_loc and stats_vis:
             st.subheader(f"📊 Estadísticas ({local} Casa vs {visitante} Fuera)")
+            
             c_r1, c_r2 = st.columns(2)
             with c_r1: 
                 html_racha = generate_streak_html(stats_loc['raw_results'])
@@ -254,8 +257,16 @@ else:
 
             comp_data = {
                 "Métrica": ["Goles A/C", "Tiros Tot/Puer", "Córners", "Tarjetas", "Faltas"],
-                f"{local}": [f"{stats_loc['gf']:.1f} / {stats_loc['ga']:.1f}", f"{stats_loc['sh']:.1f} / {stats_loc['sot']:.1f}", f"{stats_loc['corn']:.1f}", f"{stats_loc['card']:.1f}", f"{stats_loc['foul']:.1f}"],
-                f"{visitante}": [f"{stats_vis['gf']:.1f} / {stats_vis['ga']:.1f}", f"{stats_vis['sh']:.1f} / {stats_vis['sot']:.1f}", f"{stats_vis['corn']:.1f}", f"{stats_vis['card']:.1f}", f"{stats_vis['foul']:.1f}"]
+                f"{local}": [
+                    f"{stats_loc['gf']:.1f} / {stats_loc['ga']:.1f}", 
+                    f"{stats_loc['sh']:.1f} / {stats_loc['sot']:.1f}", 
+                    f"{stats_loc['corn']:.1f}", f"{stats_loc['card']:.1f}", f"{stats_loc['foul']:.1f}"
+                ],
+                f"{visitante}": [
+                    f"{stats_vis['gf']:.1f} / {stats_vis['ga']:.1f}", 
+                    f"{stats_vis['sh']:.1f} / {stats_vis['sot']:.1f}", 
+                    f"{stats_vis['corn']:.1f}", f"{stats_vis['card']:.1f}", f"{stats_vis['foul']:.1f}"
+                ]
             }
             st.dataframe(pd.DataFrame(comp_data), hide_index=True, use_container_width=True)
         else:
@@ -263,8 +274,8 @@ else:
 
         st.divider()
 
-        # JUGADORES
-        st.subheader("🔥 Top Jugadores (Media)")
+        # JUGADORES (AQUÍ ESTÁ LA NUEVA TABLA DE FALTAS)
+        st.subheader("🔥 Top Jugadores (25/26)")
         scorers_L, shooters_L, cards_L = get_player_rankings(df_players, local)
         scorers_V, shooters_V, cards_V = get_player_rankings(df_players, visitante)
         
@@ -273,16 +284,28 @@ else:
         with col_p_local:
             st.markdown(f"### 🏠 {local}")
             if scorers_L is not None:
-                st.caption("⚽ Goleadores"); st.dataframe(scorers_L.rename(columns={'gls':'G','ast':'A'}), use_container_width=True)
-                st.caption("🎯 Tiros"); st.dataframe(shooters_L.rename(columns={'sh':'T','sot':'P'}).style.format("{:.1f}"), use_container_width=True)
+                st.caption("⚽ Goleadores (Total)")
+                st.dataframe(scorers_L.rename(columns={'gls':'G','ast':'A'}), use_container_width=True)
+                st.caption("🎯 Tiros (Media)")
+                st.dataframe(shooters_L.rename(columns={'sh':'T','sot':'P'}).style.format("{:.1f}"), use_container_width=True)
+                
+                # --- NUEVA TABLA FALTAS ---
+                st.caption("🪓 Faltas (Media)")
+                st.dataframe(cards_L.rename(columns={'fls':'Faltas','crdy':'Amarillas'}).style.format("{:.1f}"), use_container_width=True)
             else: 
                 st.info(f"Sin datos jugadores.")
 
         with col_p_visit:
             st.markdown(f"### ✈️ {visitante}")
             if scorers_V is not None:
-                st.caption("⚽ Goleadores"); st.dataframe(scorers_V.rename(columns={'gls':'G','ast':'A'}), use_container_width=True)
-                st.caption("🎯 Tiros"); st.dataframe(shooters_V.rename(columns={'sh':'T','sot':'P'}).style.format("{:.1f}"), use_container_width=True)
+                st.caption("⚽ Goleadores (Total)")
+                st.dataframe(scorers_V.rename(columns={'gls':'G','ast':'A'}), use_container_width=True)
+                st.caption("🎯 Tiros (Media)")
+                st.dataframe(shooters_V.rename(columns={'sh':'T','sot':'P'}).style.format("{:.1f}"), use_container_width=True)
+                
+                # --- NUEVA TABLA FALTAS ---
+                st.caption("🪓 Faltas (Media)")
+                st.dataframe(cards_V.rename(columns={'fls':'Faltas','crdy':'Amarillas'}).style.format("{:.1f}"), use_container_width=True)
             else: st.info(f"Sin datos jugadores.")
 
         st.divider()
@@ -292,51 +315,27 @@ else:
             else: st.write("No hay datos previos.")
 
     # ==============================================================================
-    # TAB 2: EQUIPOS (REDISEÑADO ESTÉTICAMENTE)
+    # TAB 2: EQUIPOS
     # ==============================================================================
     with tabs[1]:
         tm = st.selectbox("Selecciona Equipo", all_teams, key="tab2_tm")
-        
-        # Obtenemos estadísticas generales de los últimos 20 partidos para tener muestra
         stats_gen = get_advanced_form(full_df, tm, 20, 'General')
-        
         if stats_gen:
-            st.markdown(f"## 🛡️ Ficha Técnica: {tm}")
-            st.caption("Medias basadas en los últimos 20 partidos")
-            
-            # FILA 1: Métricas Principales
+            st.markdown(f"## 🛡️ Ficha: {tm}")
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Goles a Favor", f"{stats_gen['gf']:.2f}")
-            c2.metric("Goles en Contra", f"{stats_gen['ga']:.2f}")
-            c3.metric("Tiros/Partido", f"{stats_gen['sh']:.2f}")
-            c4.metric("Córners/Partido", f"{stats_gen['corn']:.2f}")
+            c1.metric("Goles/P", f"{stats_gen['gf']:.2f}")
+            c2.metric("Tiros/P", f"{stats_gen['sh']:.2f}")
+            c3.metric("Faltas/P", f"{stats_gen['foul']:.2f}")
+            c4.metric("Tarjetas/P", f"{stats_gen['card']:.2f}")
             
-            # FILA 2: Métricas Secundarias
-            c5, c6, c7, c8 = st.columns(4)
-            c5.metric("Tiros a Puerta", f"{stats_gen['sot']:.2f}")
-            c6.metric("Faltas", f"{stats_gen['foul']:.2f}")
-            c7.metric("Tarjetas", f"{stats_gen['card']:.2f}")
-            c8.metric("Racha", "", delta=None) # Placeholder visual
-            
-            # Visualización de la Racha
-            streak_html = generate_streak_html(stats_gen['raw_results'])
-            st.markdown(f"<div style='text-align:center; background:#1e1e1e; padding:10px; border-radius:10px; margin-top:-30px;'>{streak_html}</div>", unsafe_allow_html=True)
-            
-            st.divider()
-            
-            # Historial de partidos limpio (Sin aspecto de código)
-            st.subheader("📜 Últimos Resultados")
-            # Invertimos para ver el más reciente arriba
-            for log in stats_gen['log'][::-1]:
-                st.text(log)
-        else:
-            st.warning("No hay suficientes datos para generar la ficha técnica.")
+            st.write("**Últimos 10 Partidos:**")
+            for l in stats_gen['log'][::-1][:10]: st.text(l)
 
     # ==============================================================================
-    # TAB 3: JUGADORES (LIMPIO)
+    # TAB 3: JUGADORES
     # ==============================================================================
     with tabs[2]:
-        st.header("🔎 Buscador de Jugadores")
+        st.header("🔎 Buscador")
         if not df_players.empty:
             c1, c2 = st.columns(2)
             team_sel = c1.selectbox("Equipo", all_teams, key="tab3_tm")
@@ -346,19 +345,15 @@ else:
                 players_list = sorted(df_players[df_players['team'] == real_team_name]['player'].unique())
                 pl_sel = c2.selectbox("Jugador", players_list)
                 p_stats = df_players[df_players['player'] == pl_sel].sort_values('date', ascending=False)
-                
-                st.subheader(f"📊 Estadísticas: {pl_sel}")
+                st.subheader(f"📊 {pl_sel}")
                 st.dataframe(p_stats[['date','game','min','gls','ast','sh','sot','fls','crdy']], hide_index=True, use_container_width=True)
             else:
-                st.warning(f"No encuentro jugadores para {team_sel}. (Nombre real en archivo: no encontrado)")
+                st.warning(f"No encuentro jugadores para {team_sel}.")
         else:
             st.error("El DataFrame de jugadores está vacío.")
-
-    # ==============================================================================
-    # TAB 4: PLANTILLAS
-    # ==============================================================================
+    
     with tabs[3]:
-        st.header("📊 Plantilla Completa")
+        st.header("📊 Plantilla")
         if not df_players.empty:
             team_sq = st.selectbox("Equipo", all_teams, key="tab4_tm")
             real_team_sq = fuzzy_match_team(team_sq, df_players)
