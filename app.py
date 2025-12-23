@@ -93,10 +93,6 @@ def load_players():
         if 'date' in df.columns:
             df['date'] = pd.to_datetime(df['date'], dayfirst=True, errors='coerce')
             
-        # --- CORRECCIÓN CRÍTICA: HEMOS QUITADO EL FILTRO DE FECHA ESTRICTO ---
-        # Antes borraba todo si la fecha no era > Agosto 2025. 
-        # Ahora confiamos en el archivo.
-        
         return df
     except: return pd.DataFrame()
 
@@ -104,10 +100,8 @@ def load_players():
 def get_advanced_form(df, team, games=5, filter_mode='Auto'):
     if df.empty: return None
     
-    # Filtro de temporada (Partidos) - Aquí sí mantenemos filtro o cogemos los últimos
+    # Filtro de temporada (Partidos)
     df_curr = df.sort_values('Date', ascending=True) 
-    # Si quieres filtrar por fecha ponlo aquí, si no, coge todo el historial cargado
-    # df_curr = df[df['Date'] > '2025-08-01'] 
     
     if filter_mode == 'Home': matches = df_curr[df_curr['HomeTeam'] == team]
     elif filter_mode == 'Away': matches = df_curr[df_curr['AwayTeam'] == team]
@@ -217,11 +211,18 @@ df_players = load_players()
 if full_df.empty:
     st.error("⚠️ La base de datos de partidos está vacía. Revisa la barra lateral.")
 else:
-    # Selector de equipos
-    last_year_teams = full_df.sort_values('Date').tail(400)['HomeTeam'].unique()
-    all_teams = sorted(last_year_teams)
+    # --- ARREGLO DEL ERROR DE SORTED ---
+    # Cogemos los equipos del último año, filtramos nulos y convertimos a string para evitar errores de ordenación
+    recent_matches = full_df.sort_values('Date').tail(400)
+    unique_teams_raw = recent_matches['HomeTeam'].unique()
+    # Limpieza: Solo strings y no nulos
+    clean_teams = [str(t) for t in unique_teams_raw if pd.notna(t)]
+    all_teams = sorted(clean_teams)
     
-    if not all_teams: all_teams = sorted(full_df['HomeTeam'].unique())
+    # Fallback si falla lo anterior
+    if not all_teams: 
+        raw_all = full_df['HomeTeam'].unique()
+        all_teams = sorted([str(t) for t in raw_all if pd.notna(t)])
 
     tabs = st.tabs(["🆚 Comparador PRO", "🛡️ Equipos", "⚽ Jugadores", "🏟️ Plantillas"])
 
@@ -277,10 +278,8 @@ else:
                 st.caption("🎯 Tiros"); st.dataframe(shooters_L.rename(columns={'sh':'T','sot':'P'}).style.format("{:.1f}"), use_container_width=True)
             else: 
                 st.info(f"Sin datos jugadores.")
-                # CHIVATO DE DEBUG SOLO SI FALLA
                 if not df_players.empty:
-                    st.caption(f"DEBUG: Buscando equipo '{local}' o mapeado '{TEAM_MAPPING.get(local)}'")
-                    st.caption(f"Equipos disponibles: {df_players['team'].unique()[:5]}...")
+                    st.caption(f"DEBUG: Buscando '{local}' o mapeado '{TEAM_MAPPING.get(local)}'")
 
         with col_p_visit:
             st.markdown(f"### ✈️ {visitante}")
@@ -300,7 +299,6 @@ else:
     # ==============================================================================
     with tabs[2]:
         st.header("🔎 Buscador")
-        # CHIVATO DE DATOS PARA VER QUE HAY
         with st.expander("🕵️ Ver Datos Crudos (Debug)", expanded=False):
             st.write(f"Filas totales cargadas: {len(df_players)}")
             st.write(df_players.head())
@@ -317,7 +315,7 @@ else:
                 st.write(f"**Stats de {pl_sel}:**")
                 st.dataframe(p_stats[['date','game','min','gls','ast','sh','sot','fls','crdy']], hide_index=True, use_container_width=True)
             else:
-                st.warning(f"No encuentro jugadores para {team_sel}. (Nombre real en archivo: no encontrado)")
+                st.warning(f"No encuentro jugadores para {team_sel}.")
         else:
             st.error("El DataFrame de jugadores está vacío. Revisa la carga.")
     
