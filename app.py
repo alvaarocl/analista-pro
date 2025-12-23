@@ -1,13 +1,12 @@
 import streamlit as st
 import pandas as pd
-import data_updater
 import news_engine
-import player_engine  # Importamos esto para poder descargar datos si faltan
+# YA NO IMPORTAMOS player_engine NI data_updater PORQUE USAMOS DATOS MANUALES
 from pathlib import Path
 import unicodedata
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Analista Pro (Solo Datos)", layout="wide", page_icon="⚽")
+st.set_page_config(page_title="Analista Pro 25/26", layout="wide", page_icon="⚽")
 
 # --- DICCIONARIOS ---
 PLAYER_DICT = {
@@ -24,54 +23,59 @@ MATCH_DICT = {
     "HC": "Corners Loc", "AC": "Corners Vis"
 }
 
-# --- CARGA DE DATOS ---
-@st.cache_resource
-def run_updates():
-    """Descarga datos al iniciar si no existen o para actualizar"""
-    # 1. Actualizar partidos
-    data_updater.update_data()
-    
-    # 2. Verificar si existen los jugadores. Si no, descargarlos AHORA.
-    # Esto es vital para Streamlit Cloud donde el disco empieza vacío.
-    players_path = Path("datos/jugadores_raw.csv")
-    if not players_path.exists():
-        with st.spinner("⚠️ Descargando base de datos de jugadores por primera vez (puede tardar 1 min)..."):
-            player_engine.download_player_stats()
-
+# --- CARGA DE DATOS (MODO ESTÁTICO SEGURO) ---
 @st.cache_data
 def load_matches():
+    # Buscamos en la carpeta datos/ cualquier CSV
     files = list(Path("datos").glob("*.csv"))
     files = [f for f in files if "jugadores" not in f.name]
+    
+    if not files:
+        # Si no hay archivos, no intentamos descargar nada (fallaría en Cloud).
+        # Simplemente avisamos al usuario.
+        st.error("⚠️ Faltan archivos de partidos (SP1.csv, SP2.csv) en la carpeta 'datos/'. Súbelos a GitHub.")
+        return pd.DataFrame()
+        
     dfs = []
     for f in files:
         try:
             d = pd.read_csv(f)
             if 'Date' in d.columns:
                 d['Date'] = pd.to_datetime(d['Date'], dayfirst=True, errors='coerce')
+                # FILTRO TEMPORADA 25/26: Solo partidos desde Agosto 2025
+                d = d[d['Date'] > '2025-08-01']
             dfs.append(d)
         except: continue
+        
     if not dfs: return pd.DataFrame()
-    return pd.concat(dfs, ignore_index=True)
+    return pd.concat(dfs, ignore_index=True).sort_values('Date', ascending=True)
 
 @st.cache_data
 def load_players():
     path = Path("datos/jugadores_raw.csv")
-    if not path.exists(): return pd.DataFrame()
+    
+    if not path.exists():
+        st.error("⚠️ Falta 'datos/jugadores_raw.csv'. Ejecuta player_engine.py en tu PC y sube el archivo a GitHub.")
+        return pd.DataFrame()
+        
     try:
         df = pd.read_csv(path)
-        # Normalizar columnas a minúsculas y sin espacios
+        # Limpieza de nombres de columna
         df.columns = [str(c).lower().strip() for c in df.columns]
         
-        # CORRECCIÓN DE ERROR KEYERROR:
-        # A veces FBref llama a la columna 'squad' en lugar de 'team'. Lo unificamos.
-        if 'squad' in df.columns:
+        # Parche para FBref (Squad -> Team)
+        if 'squad' in df.columns and 'team' not in df.columns:
             df = df.rename(columns={'squad': 'team'})
             
         if 'date' in df.columns:
             df['date'] = pd.to_datetime(df['date'], errors='coerce')
+            # FILTRO TEMPORADA 25/26
+            df = df[df['date'] > '2025-08-01']
             
         return df
-    except: return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Error leyendo archivo de jugadores: {e}")
+        return pd.DataFrame()
 
 # --- FUNCIONES LÓGICAS ---
 
@@ -83,17 +87,21 @@ def fuzzy_match_team(team_name, df_players):
     if df_players.empty or 'team' not in df_players.columns: return team_name
     target = normalize_str(team_name)
     player_teams = df_players['team'].dropna().unique()
+    
+    # 1. Búsqueda Exacta
     for t in player_teams:
         if normalize_str(t) == target: return t
+    # 2. Búsqueda Parcial
     for t in player_teams:
         norm = normalize_str(t)
         if target in norm or norm in target: return t
+        
     return team_name
 
 def get_stats_pack(df, team, venue_filter='All'):
-    """Calcula stats y devuelve también el historial de rivales."""
     if df.empty: return None
     
+    # Filtro
     if venue_filter == 'Home': matches = df[df['HomeTeam'] == team]
     elif venue_filter == 'Away': matches = df[df['AwayTeam'] == team]
     else: matches = df[(df['HomeTeam'] == team) | (df['AwayTeam'] == team)]
@@ -102,11 +110,14 @@ def get_stats_pack(df, team, venue_filter='All'):
     if matches.empty: return None
     
     stats = {'goals': [], 'shots': [], 'corners': [], 'cards': [], 'fouls': []}
-    history = [] 
+    history = []
 
     for _, r in matches.iterrows():
         is_home = (r['HomeTeam'] == team)
         opponent = r['AwayTeam'] if is_home else r['HomeTeam']
+        
+        # Formatear fecha corta
+        date_str = r['Date'].strftime("%d/%m") if pd.notnull(r['Date']) else ""
         
         if is_home:
             hg, ag = r['FTHG'], r['FTAG']
@@ -114,14 +125,14 @@ def get_stats_pack(df, team, venue_filter='All'):
             stats['goals'].append(hg); stats['shots'].append(r.get('HS', 0))
             stats['corners'].append(r.get('HC', 0)); stats['cards'].append(r.get('HY', 0))
             stats['fouls'].append(r.get('HF', 0))
-            history.append(f"{res} {int(hg)}-{int(ag)} vs {opponent} (C)")
+            history.append(f"{date_str} {res} {int(hg)}-{int(ag)} vs {opponent} (C)")
         else:
             hg, ag = r['FTHG'], r['FTAG']
             res = '✅' if ag > hg else ('❌' if ag < hg else '➖')
             stats['goals'].append(ag); stats['shots'].append(r.get('AS', 0))
             stats['corners'].append(r.get('AC', 0)); stats['cards'].append(r.get('AY', 0))
             stats['fouls'].append(r.get('AF', 0))
-            history.append(f"{res} {int(ag)}-{int(hg)} vs {opponent} (F)")
+            history.append(f"{date_str} {res} {int(ag)}-{int(hg)} vs {opponent} (F)")
 
     avgs = {k: sum(v)/len(v) if v else 0 for k, v in stats.items()}
     avgs['count'] = len(matches)
@@ -129,51 +140,53 @@ def get_stats_pack(df, team, venue_filter='All'):
     return avgs
 
 def get_extended_player_list(df_players, team_name):
-    """Devuelve DataFrames de jugadores clave."""
-    # PROTECCIÓN CONTRA EL ERROR KEYERROR
-    if df_players.empty or 'team' not in df_players.columns:
-        return pd.DataFrame()
-        
+    if df_players.empty or 'team' not in df_players.columns: return pd.DataFrame()
+    
     real_team = fuzzy_match_team(team_name, df_players)
     df_p = df_players[df_players['team'] == real_team].copy()
     if df_p.empty: return pd.DataFrame()
     
+    # Filtrar últimos 5 partidos JUGADOS POR EL EQUIPO
     recent_dates = sorted(df_p['date'].unique(), reverse=True)[:5]
     df_recent = df_p[df_p['date'].isin(recent_dates)]
     return df_recent
 
 def prepare_display_tables(df_recent):
-    """Prepara las tablas bonitas (Top 6)"""
     if df_recent is None or df_recent.empty: return None, None
     
-    # Tabla 1: Rematadores
+    # Top Rematadores
     df_sh = df_recent.groupby('player')[['sh', 'sot']].mean().sort_values('sh', ascending=False).head(6)
     df_sh = df_sh.rename(columns={'sh': 'Remates', 'sot': 'A Puerta'})
     
-    # Tabla 2: Leñeros
+    # Top Leñeros
     df_fls = df_recent.groupby('player')[['fls', 'crdy']].mean().sort_values('fls', ascending=False).head(6)
     df_fls = df_fls.rename(columns={'fls': 'Faltas', 'crdy': 'Tarjetas'})
     
     return df_sh, df_fls
 
 # --- INTERFAZ ---
-# Ejecutamos la actualización al principio
-run_updates()
-
 df = load_matches()
 df_players = load_players()
 
-st.sidebar.title("🤖 Analista Pro")
-tabs = st.tabs(["📉 Comparador de Datos", "📊 Base de Datos", "⚽ Jugador", "🏟️ Plantillas"])
+st.sidebar.title("🤖 Analista Pro 25/26")
+
+if not df.empty:
+    min_date = df['Date'].min().strftime('%d/%m/%Y')
+    max_date = df['Date'].max().strftime('%d/%m/%Y')
+    st.sidebar.success(f"📅 Datos: {min_date} - {max_date}")
+else:
+    st.sidebar.warning("⚠️ No hay datos de partidos cargados.")
+
+tabs = st.tabs(["📉 Comparador", "📊 Partidos", "⚽ Jugador", "🏟️ Plantillas"])
 
 # ==============================================================================
 # TAB 1: COMPARADOR DE DATOS (SOLO DATOS)
 # ==============================================================================
 with tabs[0]:
-    st.header("📉 Comparador de Datos Puro")
+    st.header("📉 Comparador de Datos (Temporada 25/26)")
     
     if df.empty:
-        st.warning("⚠️ No se encontraron datos de partidos. Verifica que la descarga funcionó.")
+        st.warning("⚠️ Sube los archivos CSV a GitHub (carpeta datos/) para empezar.")
     else:
         teams = sorted(df['HomeTeam'].dropna().unique())
         c1, c2 = st.columns(2)
@@ -192,33 +205,27 @@ with tabs[0]:
             
             # Noticias
             with st.spinner("Cargando noticias..."):
-                try:
-                    news = news_engine.get_live_context(local, visitante)
-                except:
-                    news = {}
+                try: news = news_engine.get_live_context(local, visitante)
+                except: news = {}
 
             st.divider()
 
             # --- SECCIÓN 1: HISTORIAL ---
-            st.subheader("🗓️ Historial Reciente (Contexto de Fuerza)")
+            st.subheader("🗓️ Historial Reciente")
             
             col_h1, col_h2 = st.columns(2)
             
             with col_h1:
                 st.markdown(f"**{local} (Últimos 5 en Casa)**")
                 if spec_loc:
-                    for match in spec_loc['match_log']:
-                        st.text(match)
-                else:
-                    st.info("Sin partidos en casa recientes.")
+                    for match in spec_loc['match_log']: st.text(match)
+                else: st.info("Sin partidos en casa.")
             
             with col_h2:
                 st.markdown(f"**{visitante} (Últimos 5 Fuera)**")
                 if spec_vis:
-                    for match in spec_vis['match_log']:
-                        st.text(match)
-                else:
-                    st.info("Sin partidos fuera recientes.")
+                    for match in spec_vis['match_log']: st.text(match)
+                else: st.info("Sin partidos fuera.")
 
             st.divider()
 
