@@ -10,10 +10,12 @@ st.set_page_config(page_title="Analista Pro Total", layout="wide", page_icon="�
 # --- ESTILOS CSS ---
 st.markdown("""
 <style>
-    .win { color: #4CAF50; font-weight: bold; font-size: 1.2em; }
-    .loss { color: #F44336; font-weight: bold; font-size: 1.2em; }
-    .draw { color: #FFC107; font-weight: bold; font-size: 1.2em; }
-    .stat-box { background-color: #262730; padding: 10px; border-radius: 5px; text-align: center; }
+    .win { color: #4CAF50; font-weight: bold; font-size: 1.5em; padding: 0 5px; }
+    .loss { color: #F44336; font-weight: bold; font-size: 1.5em; padding: 0 5px; }
+    .draw { color: #FFC107; font-weight: bold; font-size: 1.5em; padding: 0 5px; }
+    .stat-box { background-color: #262730; padding: 15px; border-radius: 8px; text-align: center; margin-bottom: 10px; }
+    .big-number { font-size: 24px; font-weight: bold; }
+    .label { font-size: 14px; color: #aaa; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -212,14 +214,11 @@ if full_df.empty:
     st.error("⚠️ La base de datos de partidos está vacía. Revisa la barra lateral.")
 else:
     # --- ARREGLO DEL ERROR DE SORTED ---
-    # Cogemos los equipos del último año, filtramos nulos y convertimos a string para evitar errores de ordenación
     recent_matches = full_df.sort_values('Date').tail(400)
     unique_teams_raw = recent_matches['HomeTeam'].unique()
-    # Limpieza: Solo strings y no nulos
     clean_teams = [str(t) for t in unique_teams_raw if pd.notna(t)]
     all_teams = sorted(clean_teams)
     
-    # Fallback si falla lo anterior
     if not all_teams: 
         raw_all = full_df['HomeTeam'].unique()
         all_teams = sorted([str(t) for t in raw_all if pd.notna(t)])
@@ -278,8 +277,6 @@ else:
                 st.caption("🎯 Tiros"); st.dataframe(shooters_L.rename(columns={'sh':'T','sot':'P'}).style.format("{:.1f}"), use_container_width=True)
             else: 
                 st.info(f"Sin datos jugadores.")
-                if not df_players.empty:
-                    st.caption(f"DEBUG: Buscando '{local}' o mapeado '{TEAM_MAPPING.get(local)}'")
 
         with col_p_visit:
             st.markdown(f"### ✈️ {visitante}")
@@ -295,14 +292,51 @@ else:
             else: st.write("No hay datos previos.")
 
     # ==============================================================================
-    # TAB 3: JUGADORES
+    # TAB 2: EQUIPOS (REDISEÑADO ESTÉTICAMENTE)
+    # ==============================================================================
+    with tabs[1]:
+        tm = st.selectbox("Selecciona Equipo", all_teams, key="tab2_tm")
+        
+        # Obtenemos estadísticas generales de los últimos 20 partidos para tener muestra
+        stats_gen = get_advanced_form(full_df, tm, 20, 'General')
+        
+        if stats_gen:
+            st.markdown(f"## 🛡️ Ficha Técnica: {tm}")
+            st.caption("Medias basadas en los últimos 20 partidos")
+            
+            # FILA 1: Métricas Principales
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Goles a Favor", f"{stats_gen['gf']:.2f}")
+            c2.metric("Goles en Contra", f"{stats_gen['ga']:.2f}")
+            c3.metric("Tiros/Partido", f"{stats_gen['sh']:.2f}")
+            c4.metric("Córners/Partido", f"{stats_gen['corn']:.2f}")
+            
+            # FILA 2: Métricas Secundarias
+            c5, c6, c7, c8 = st.columns(4)
+            c5.metric("Tiros a Puerta", f"{stats_gen['sot']:.2f}")
+            c6.metric("Faltas", f"{stats_gen['foul']:.2f}")
+            c7.metric("Tarjetas", f"{stats_gen['card']:.2f}")
+            c8.metric("Racha", "", delta=None) # Placeholder visual
+            
+            # Visualización de la Racha
+            streak_html = generate_streak_html(stats_gen['raw_results'])
+            st.markdown(f"<div style='text-align:center; background:#1e1e1e; padding:10px; border-radius:10px; margin-top:-30px;'>{streak_html}</div>", unsafe_allow_html=True)
+            
+            st.divider()
+            
+            # Historial de partidos limpio (Sin aspecto de código)
+            st.subheader("📜 Últimos Resultados")
+            # Invertimos para ver el más reciente arriba
+            for log in stats_gen['log'][::-1]:
+                st.text(log)
+        else:
+            st.warning("No hay suficientes datos para generar la ficha técnica.")
+
+    # ==============================================================================
+    # TAB 3: JUGADORES (LIMPIO)
     # ==============================================================================
     with tabs[2]:
-        st.header("🔎 Buscador")
-        with st.expander("🕵️ Ver Datos Crudos (Debug)", expanded=False):
-            st.write(f"Filas totales cargadas: {len(df_players)}")
-            st.write(df_players.head())
-            
+        st.header("🔎 Buscador de Jugadores")
         if not df_players.empty:
             c1, c2 = st.columns(2)
             team_sel = c1.selectbox("Equipo", all_teams, key="tab3_tm")
@@ -312,18 +346,19 @@ else:
                 players_list = sorted(df_players[df_players['team'] == real_team_name]['player'].unique())
                 pl_sel = c2.selectbox("Jugador", players_list)
                 p_stats = df_players[df_players['player'] == pl_sel].sort_values('date', ascending=False)
-                st.write(f"**Stats de {pl_sel}:**")
+                
+                st.subheader(f"📊 Estadísticas: {pl_sel}")
                 st.dataframe(p_stats[['date','game','min','gls','ast','sh','sot','fls','crdy']], hide_index=True, use_container_width=True)
             else:
-                st.warning(f"No encuentro jugadores para {team_sel}.")
+                st.warning(f"No encuentro jugadores para {team_sel}. (Nombre real en archivo: no encontrado)")
         else:
-            st.error("El DataFrame de jugadores está vacío. Revisa la carga.")
-    
-    # Resto de pestañas...
-    with tabs[1]:
-        tm = st.selectbox("Equipo", all_teams, key="tab2"); st.write(get_advanced_form(full_df, tm, 38, 'General'))
+            st.error("El DataFrame de jugadores está vacío.")
+
+    # ==============================================================================
+    # TAB 4: PLANTILLAS
+    # ==============================================================================
     with tabs[3]:
-        st.header("📊 Plantilla")
+        st.header("📊 Plantilla Completa")
         if not df_players.empty:
             team_sq = st.selectbox("Equipo", all_teams, key="tab4_tm")
             real_team_sq = fuzzy_match_team(team_sq, df_players)
@@ -331,3 +366,5 @@ else:
                 df_sq = df_players[df_players['team'] == real_team_sq]
                 summ = df_sq.groupby('player').agg({'min':'sum', 'gls':'sum', 'ast':'sum', 'sh':'mean', 'sot':'mean', 'fls':'mean', 'crdy':'sum'}).reset_index()
                 st.dataframe(summ.rename(columns={'min':'Min','gls':'G','ast':'A','sh':'Tiros/P','sot':'Puerta/P','fls':'Faltas/P','crdy':'Amarillas'}).style.format("{:.2f}", subset=['Tiros/P','Puerta/P','Faltas/P']), hide_index=True, use_container_width=True, height=700)
+            else:
+                st.warning(f"Sin datos de plantilla para {team_sq}")
