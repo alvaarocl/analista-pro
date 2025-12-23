@@ -29,32 +29,26 @@ def normalize_name(name):
 
 def flatten_and_clean(df, source_name):
     """
-    Aplana MultiIndex, saca el índice a columnas y renombra lo básico.
+    Aplana MultiIndex, saca el índice a columnas, renombra y ELIMINA DUPLICADOS.
     """
     print(f"🔧 Procesando tabla: {source_name}...")
     
-    # 1. Aplanar columnas MultiIndex (Ej: ('Performance', 'Gls') -> 'gls')
+    # 1. Aplanar columnas MultiIndex
     if isinstance(df.columns, pd.MultiIndex):
         new_cols = []
         for col in df.columns:
-            # Cogemos el último nivel que no esté vacío
-            # Si col es ('', 'Player') -> 'Player'
-            # Si col es ('Performance', 'Gls') -> 'Gls'
+            # Cogemos el último nivel no vacío
             c_name = col[-1] if col[-1] else (col[0] if col[0] else "unknown")
             new_cols.append(str(c_name))
         df.columns = new_cols
 
-    # 2. Resetear el índice (Aquí es donde suelen estar 'game', 'player', 'team')
-    # soccerdata suele poner los IDs en el índice, no en las columnas.
+    # 2. Resetear el índice (esto saca 'game', 'player', etc. a columnas)
     df = df.reset_index()
 
-    # 3. Limpieza de nombres
+    # 3. Limpieza de nombres básica
     df.columns = [str(c).lower().strip() for c in df.columns]
     
-    # 4. Renombrado inteligente (si el índice no tenía nombre, se llama 'level_0', etc)
-    # soccerdata devuelve: league, season, game, team, player (en ese orden en el índice)
-    
-    # Mapeo explícito de columnas conocidas
+    # 4. Renombrado inteligente
     rename_map = {
         'game_id': 'game', 'match_id': 'game', 'match': 'game',
         'squad': 'team', 'opponent': 'opponent', 
@@ -62,26 +56,30 @@ def flatten_and_clean(df, source_name):
     }
     df = df.rename(columns=rename_map)
 
+    # --- CORRECCIÓN DEL ERROR CRÍTICO ---
+    # Eliminar columnas duplicadas (si hay dos 'game', se queda solo con la primera)
+    df = df.loc[:, ~df.columns.duplicated()]
+
     # 5. Eliminar columnas vacías o 'unnamed'
     df = df.loc[:, ~df.columns.str.contains('unnamed')]
     df = df.loc[:, df.columns != '']
 
-    # Debug: Ver si tenemos lo necesario
+    # Debug
     required = ['game', 'team', 'player']
     missing = [x for x in required if x not in df.columns]
     
     if missing:
-        print(f"⚠️ AVISO en {source_name}: Faltan columnas {missing}. Columnas actuales: {list(df.columns)}")
+        print(f"⚠️ AVISO en {source_name}: Faltan columnas {missing}.")
     else:
-        print(f"✅ {source_name} procesada correctamente.")
+        print(f"✅ {source_name} procesada correctamente (Columnas únicas aseguradas).")
         
     return df
 
 def download_player_stats():
-    print("📥 Iniciando descarga de JUGADORES 25/26 (Script Robusto)...")
+    print("📥 Iniciando descarga de JUGADORES 25/26...")
     
     try:
-        # Usamos temporada 2526
+        # Temporada 25/26
         fbref = sd.FBref(leagues="ESP-La Liga", seasons=["2526"])
         
         # 1. CALENDARIO
@@ -92,15 +90,15 @@ def download_player_stats():
         if 'game' in schedule.columns and 'date' in schedule.columns:
             schedule_min = schedule[['game', 'date']].drop_duplicates()
         else:
-            print("❌ Error crítico: No se pudo extraer 'game' y 'date' del calendario.")
+            print("❌ Error crítico: Calendario sin 'game' o 'date'.")
             return
 
-        # 2. SUMMARY (Estadísticas principales)
+        # 2. SUMMARY
         print("⚽ Descargando Stats Summary...")
         summary = fbref.read_player_match_stats(stat_type="summary")
         summary = flatten_and_clean(summary, "Summary")
 
-        # 3. MISC (Tarjetas, faltas, etc)
+        # 3. MISC
         print("🟨 Descargando Stats Misc...")
         misc = fbref.read_player_match_stats(stat_type="misc")
         misc = flatten_and_clean(misc, "Misc")
@@ -108,22 +106,16 @@ def download_player_stats():
         # 4. UNIÓN
         print("🔄 Uniendo tablas...")
         
-        # Aseguramos claves de unión
         join_keys = ['game', 'team', 'player']
         
-        # Verificar integridad
-        if not set(join_keys).issubset(summary.columns):
-            print("❌ Deteniendo: Faltan claves en Summary.")
-            return
-
-        # Merge Summary + Misc
+        # Merge seguro
         df = pd.merge(summary, misc, on=join_keys, how='left', suffixes=('', '_misc'))
         
         # Merge con Fechas
         df = pd.merge(df, schedule_min, on='game', how='left')
         
         # 5. LIMPIEZA FINAL
-        # Eliminar duplicados
+        # Eliminar filas duplicadas (mismo jugador en mismo partido)
         initial = len(df)
         df = df.drop_duplicates(subset=['game', 'player'])
         final = len(df)
@@ -134,7 +126,7 @@ def download_player_stats():
         if 'team' in df.columns:
             df['team'] = df['team'].apply(lambda x: TEAM_MAP.get(normalize_name(x), x))
 
-        # Convertir a números (rellenar vacíos con 0)
+        # Convertir a números
         numeric_cols = ['sh', 'sot', 'fls', 'crdy', 'gls', 'ast']
         for col in numeric_cols:
             if col not in df.columns: df[col] = 0
@@ -151,8 +143,8 @@ def download_player_stats():
 
     except Exception as e:
         import traceback
-        print(f"❌ ERROR CRÍTICO DEL SISTEMA: {e}")
-        print(traceback.format_exc())
+        print(f"❌ ERROR: {e}")
+        # print(traceback.format_exc()) # Descomentar si quieres ver todo el error técnico
 
 if __name__ == "__main__":
     download_player_stats()
